@@ -116,7 +116,7 @@
       [server-value keep-alive-value close-value]
       (map #(HttpHeaders/newEntity %) ["Aleph/0.4.6" "Keep-Alive" "Close"])]
   (defn send-response
-    [^ChannelHandlerContext ctx keep-alive? ssl? rsp]
+    [^ChannelHandlerContext ctx keep-alive? ssl? hide-server-header? rsp]
     (let [[^HttpResponse rsp body]
           (try
             [(http/ring-response->netty-response rsp)
@@ -129,7 +129,8 @@
       (netty/safe-execute ctx
         (let [headers (.headers rsp)]
 
-          (when-not (.contains headers ^CharSequence server-name)
+          (when-not (or hide-server-header?
+                        (.contains headers ^CharSequence server-name))
             (.set headers ^CharSequence server-name server-value))
 
           (when-not (.contains headers ^CharSequence date-name)
@@ -159,7 +160,8 @@
    ^HttpRequest req
    previous-response
    body
-   keep-alive?]
+   keep-alive?
+   hide-server-header?]
   (let [^NettyRequest req' (http/netty-request->ring-request req ssl? (.channel ctx) body)
         head? (identical? HttpMethod/HEAD (.method req))
         rsp (if executor
@@ -194,7 +196,7 @@
             (d/chain'
               (fn [rsp]
                 (when (not (-> req' ^AtomicBoolean (.websocket?) .get))
-                  (send-response ctx keep-alive? ssl?
+                  (send-response ctx keep-alive? ssl? hide-server-header?
                     (cond
 
                       (map? rsp)
@@ -226,7 +228,7 @@
     (fn [_] (netty/close ctx))))
 
 (defn ring-handler
-  [ssl? handler rejected-handler executor buffer-capacity]
+  [ssl? handler rejected-handler executor buffer-capacity hide-server-header?]
   (let [buffer-capacity (long buffer-capacity)
         request (atom nil)
         buffer (atom [])
@@ -246,7 +248,8 @@
               req
               @previous-response
               (when body (bs/to-input-stream body))
-              (HttpHeaders/isKeepAlive req))))
+              (HttpHeaders/isKeepAlive req)
+              hide-server-header?)))
 
         process-request
         (fn [ctx req]
@@ -348,7 +351,7 @@
           (.fireChannelRead ctx msg))))))
 
 (defn raw-ring-handler
-  [ssl? handler rejected-handler executor buffer-capacity]
+  [ssl? handler rejected-handler executor buffer-capacity hide-server-header?]
   (let [buffer-capacity (long buffer-capacity)
         stream (atom nil)
         previous-response (atom nil)
@@ -365,7 +368,8 @@
               req
               @previous-response
               body
-              (HttpUtil/isKeepAlive req))))]
+              (HttpUtil/isKeepAlive req)
+              hide-server-header?)))]
     (netty/channel-inbound-handler
 
       :exception-caught
@@ -469,7 +473,8 @@
      compression-level
      idle-timeout
      continue-handler
-     continue-executor]
+     continue-executor
+     hide-server-header?]
     :or
     {request-buffer-size 16384
      max-initial-line-length 8192
@@ -479,8 +484,8 @@
      idle-timeout 0}}]
   (fn [^ChannelPipeline pipeline]
     (let [handler (if raw-stream?
-                    (raw-ring-handler ssl? handler rejected-handler executor request-buffer-size)
-                    (ring-handler ssl? handler rejected-handler executor request-buffer-size))
+                    (raw-ring-handler ssl? handler rejected-handler executor request-buffer-size hide-server-header?)
+                    (ring-handler ssl? handler rejected-handler executor request-buffer-size hide-server-header?))
           ^ChannelHandler
           continue-handler (if (nil? continue-handler)
                              (HttpServerExpectContinueHandler.)
@@ -519,12 +524,14 @@
            epoll?
            compression?
            continue-handler
-           continue-executor]
+           continue-executor
+           hide-server-header?]
     :or {bootstrap-transform identity
          pipeline-transform identity
          shutdown-executor? true
          epoll? false
-         compression? false}
+         compression? false
+         hide-server-header? false}
     :as options}]
   (let [executor (cond
                    (instance? Executor executor)
